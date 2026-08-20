@@ -1,0 +1,305 @@
+# Order-RAG 实验总结（方法 + 结果 + 消融 + 分析）
+
+> 主表数据均来自 **DynamicRAG eval_1000**（top-5 检索证据，4 数据集 2wiki/hotpot/nq/triviaqa），本会话用重建后的代码复现、产物落 `results/` 可本地核验。历史 exp.md 的老实验（eval_512，原始产物已丢失）仅作佐证引用。Gemma2-9B-IT 训练进行中。
+
+---
+
+## 0. 核心论点
+
+普通 unordered RAG 的 RL 微调多数只是 **order augmentation**（让模型见过不同文档顺序），而**不是真正的 order-invariance optimization**（让模型在不同顺序下稳定输出同一答案）。前者只提升"在见过的排列上答对"，reward 仍逐样本算，从不告诉模型"同一题不同顺序应一致"。
+
+本工作在 BAR-RAG 两阶段框架上做顺序鲁棒 generator：构造同题的 forward/reverse 两种文档顺序、用 `order_group_uid` 把它们绑进**同一个 GRPO advantage 组**，并设计 **group-level order-consistency reward**，使训练目标从"每排列尽量答对"升级为"同题跨排列一致且答对"。我们用 4 个模型族 + reranker baseline + 顺序稳定性评测来验证。
+
+---
+
+## 1. 方法
+
+### 1.1 框架：复用检索，训练 generator
+完整 BAR-RAG 含 selector→generator 两阶段。本工作**跳过 21M Wikipedia 检索与 selector 重训**，直接复用 DynamicRAG 数据里**已检索好的 contexts**，只在 generator 侧做顺序鲁棒 GRPO。链路：
+
+```
+DynamicRAG 已检索上下文 → top-5 证据 → 同题 forward+reverse 两种顺序 prompt
+→ 共享 order_group_uid 的 2x4 grouped GRPO（LoRA） → 合并 HF 模型 → DynamicRAG eval_1000
+```
+
+### 1.2 2×4 grouped GRPO 与 order_group_uid
+- **数据构造** (`examples/build_order_generator_data.py`)：每个问题构造 2 种顺序 variant：`forward`（原检索序）+ `reverse`（5 篇倒序）；同题两 variant 共享 `order_group_uid`，并打 `order_variant` 标签。训练集 = 10000 问题组 × 2 = 20000 行，`rollout.n=4`，`train_batch_size=32`（每 batch 16 个完整问题组）。`data.shuffle=False` + `order_group_batching=True` 保证同组不跨 batch 打散。（`four_orders` 消融数据另含 random/answer_late，对应 `rollout.n=2`。）
+- **GRPO 分组 patch** (`verl/trainer/ppo/ray_trainer.py::_build_training_uids`)：verl 原生按"同一 prompt 的 n 个 rollout"分组算 advantage（每 prompt 独立随机 uid）。我们改成优先读取 `extra_info.order_group_uid` 作为 uid：同题 forward+reverse 的 8 条 rollout（2×4）共享一个 advantage 组，使 GRPO 的 baseline 归一化在**同题跨顺序**上进行，而不是各自独立。没有该字段时退回随机 uuid（不破坏旧 baseline）。
+
+### 1.3 Reward：legacy_order_balance
+基础 generator reward（与 BAR-RAG 一致，`base_generator_reward`）：
+```
+qa_reward = 0.7*F1_max + 0.3*EM_max          # 多 gold 取 max
+cite_reward = peaked(cited_doc_count, target=2)   # 引用 2 篇得 1.0，±1 得 0.5
+base_score = 0.8*qa_reward + 0.2*cite_reward
+```
+组内 order-consistency bonus（同 `order_group_uid` 内比较，`compute_pair_bonus`）：
+```
+group_bonus = consistency_reward             # λ=0.08 × 组内多数答案一致率
+            + min_pair_reward                # λ=0.05 × 组内 min(base_score)
+            − variance_penalty               # λ=0.10 × 组内 base_score 方差
+            + flip_adjustment                # harmful flip −0.12；弱顺序答对 +0.08；强顺序单边答对 −0.02
+final_reward = clip(base_score + group_bonus, −0.2, 1.3)
+```
+设计动机：
+- **consistency / min_pair / variance**：鼓励"同题跨顺序答案一致、且都尽量答对、且不忽好忽坏"，将 sample-level 目标升级到 pair/group-level。
+- **flip_adjustment**：直接惩罚 harmful flip（某顺序对、另一顺序错），弱顺序答对给奖励（把训练信号集中到真正难、顺序敏感的样本），强顺序单边答对轻微降权（避免继续强化本就容易的顺序）。
+
+### 1.4 Reward 消融模式（供对比，已在脚本/配置中实现）
+- `base`：只发 `base_score`，无任何组内项——对应"普通 unordered 但 reward 仍逐样本"的 baseline。
+- `legacy_order_balance`：上面的主线 reward。
+- `pv` (paired-view)：
+```
+R_pv = base + α(0.30)·base·paired_mean − β(0.20)·|base − paired_mean|
+```
+更简洁的成对验证式 reward（用同组其余 variant 的均值作"参考裁判"）。
+
+---
+
+## 2. 实验设置（Experiments）
+
+### 2.1 模型
+| 短名 | 基座 | 参数 | instruct? | dtype | 上下文 | thinking | 路径 |
+|---|---|---|---|---|---|---|---|
+| mistral7b-v02 | Mistral-7B-Instruct-v0.2 | 7.3B | yes | bf16 | 32k | n/a | `/ainative/.../mistralai/Mistral-7B-Instruct-v0.2` |
+| llama31-8b | Llama-3.1-8B-Instruct | 8B | yes | bf16 | 128k | n/a | `/ainative/.../LLM-Research/Llama-3.1-8B-Instruct` |
+| qwen3-8b | Qwen3-8B | 8B | yes(hybrid) | bf16 | 128k | **关** | `/ainative/.../Qwen/Qwen3-8B` |
+| qwen3-1p7b | Qwen3-1.7B | 1.7B | yes(hybrid) | bf16 | 32k | **关** | `/ainative/.../Qwen/Qwen3-1.7B` |
+| gemma2-9b-it | Gemma2-9B-IT | 9B | yes | bf16 | **8192** | n/a | `/home/admin/gemma-2-9b-it`（进行中） |
+
+Qwen3 系默认带 hybrid-thinking，训练/评测统一 `enable_thinking=False`（输出直接 `<evidence>/<answer>`，不吐 `◷` 思考链）。Gemma2 上下文硬上限 8192，其所有评测 `max_model_len=8192`。
+
+### 2.2 数据集与检索
+- **评测集**：DynamicRAG eval_1000（来源 HuggingFace `gasolsun/DynamicRAG-Eval-Data`，`eval_data.zip` 解压规范化），4 个数据集各 1000 题，共 4000：`2wiki`（2WikiMultihopQA）、`hotpot`（HotpotQA）、`nq`（NaturalQuestions）、`triviaqa`（TriviaQA）。每题带已检索 `ctxs`（≈50 篇，含 title/doc）与 `answers`（多 gold）。
+- **generator 输入**：取 `ctxs[:5]`（top-5 检索证据），按文档顺序拼进 prompt3（见 2.5）。
+- **训练集**：`data/generator_order_balance_10k/{train,val}.parquet`，由 `examples/build_order_generator_data.py` 从 DynamicRAG train_pool 构造，strategy=`unordered`（每题 forward+reverse 两 variant）。train = **10000 问题组 × 2 = 20000 行**；val = 512 行（forward only）。字段：`data_source/prompt/response/reward_model/extra_info`，其中 `extra_info.order_group_uid`（同题两 variant 共享）、`order_variant`。
+- **rerank 用全量**：reranker baseline 时对每题全部 ~50 篇 ctxs 重新打分排序，再取 top-5（见 2.6）。
+
+### 2.3 训练框架与超参
+- **框架**：verl（工作区版本 `verl/`，带 `order_group_uid` GRPO 分组 patch），算法 **GRPO**（`adv_estimator=grpo`，无 critic）。
+- **参数化**：LoRA，rank=64 / alpha=32 / target=all-linear，rank=64 覆盖全部 nn.Linear；全模型 FSDP 分片，bf16 autocast 训练。
+- **显式超参表**（固定，仅在显式参数消融时改）：
+
+| 项 | 值 |
+|---|---|
+| rollout.n | 4（2×4 grouped） |
+| train_batch_size | 32（=16 个完整问题组） |
+| ppo_mini_batch_size | 32 |
+| ppo_micro_batch_size_per_gpu | 8（9B/8B）；1.7B 亦可 8 |
+| total_epochs / steps | 1 epoch ≈ **625 steps**（20000/32） |
+| save_freq | 200（ckpt 200/400/600，Gemma2 另存 625） |
+| actor lr | 5e-6，cosine，warmup 0.02，min_lr_ratio 0.1 |
+| KL | use_kl_loss=True，coef=0.001，type=low_var_kl；kl_ctrl target_kl=0.1, ppo_kl_coef=0.1 |
+| entropy_coeff | 0 |
+| reward_manager | batch（自定义 `order_consistency.py:compute_score`） |
+| TP (rollout vLLM) | 4 |
+| gpu_memory_utilization | 0.5–0.55 |
+| enable_gradient_checkpointing | True（8B/9B 必须） |
+| ref param_offload | True；actor param/optim offload False |
+
+- **加速旋钮**（复现的 1.7B / Gemma2-IT 用；显著提速 prefill）：`enforce_eager=False` + `enable_chunked_prefill=True` + `max_num_batched_tokens=65536`。实测 1.7B ~18 s/it、Gemma2-9B-IT ~58 s/it。
+- **硬件**：8 × NVIDIA H20-3e（141 GB/卡），CUDA 12.4，driver 570；软件 torch 2.6.0+cu124 / vllm 0.8.5.post1 / transformers 4.51.1 / peft 0.14.0 / ray 2.46。**bitsandbytes 保持卸载**（其 `triton.ops` 崩链会让 LoRA 注入崩溃，verl LoRA 链路不需要 bnb）。
+- **续训**：脚本支持 `RESUME_MODE=auto`（verl 读 `latest_checkpointed_iteration.txt` 恢复 model/optim/lr_scheduler/rng 全状态）；Gemma2-IT 因中途误断已用此从 step200 续训。
+
+### 2.4 Reward 超参（legacy_order_balance）
+基础 reward `base_score = 0.8·qa + 0.2·cite`，其中 `qa = 0.7·F1_max + 0.3·EM_max`、`cite = peaked(cited_docs, target=2)`。组内 bonus 各项系数（固定）：
+
+| 项 | 系数 |
+|---|---|
+| consistency_lambda | 0.08 |
+| min_pair_lambda | 0.05 |
+| variance_lambda | 0.10 |
+| weak_correct_bonus | +0.08 |
+| strong_correct_penalty | −0.02 |
+| harmful_flip_penalty | −0.12 |
+| final clip | [−0.2, 1.3] |
+| paired (pv 模式) | α=0.30, β=0.20 |
+
+### 2.5 评测协议与指标（主表 EM/F1）
+- **prompt 模板 prompt3**（`qa_inference.py`，固定）：系统给出严格输出格式 `<evidence>...</evidence><answer>...</answer>`，要求只用检索文档作答、简短答案、yes/no 从事实推理；文档块 `Doc [i]: Title / Content`；截 `ctxs[:5]`。
+- **解码**：temperature=0（贪心），top_p=1.0，max_new_tokens=1024，n=1，确定性。
+- **chat template**：Qwen3 关 thinking（`--use_chat_template --enable_thinking false`）；Gemma2-IT 用自带 IT chat template；Llama/Mistral 主评测用其 chat template。一致原则：评测与训练 rollout 用同一 prompt 包装。
+- **指标**：SQuAD 风格（`eval.py`）——归一化（小写、去标点、去冠词 a/an/the、合并空格）后：`EM` = 与任一 gold 完全匹配（多 gold 取 max）；`F1` = token 级 precision/recall 的调和均值（多 gold 取 max）。每数据集 1000 题求平均百分比，再对 4 数据集简单平均得 AvgEM/AvgF1。
+- **max_model_len**：Qwen3/Llama 16384；Gemma2 必须 ≤8192（硬上限）。
+- **主表 = 单排列 forward（原始检索顺序）**；顺序稳定性见 2.7。
+
+### 2.6 Baselines
+- **No-rerank 原顺序**：generator 直接吃 `ctxs[:5]`（DynamicRAG 原始检索序）。base / RL 两臂。
+- **Reranker baseline**：Qwen3-Reranker（0.6B 用于 Mistral；4B 用于其它三族），官方 yes/no 配方：对每题全部 ~50 篇 ctxs 构造 `<Instruct>/<Query>/<Document>`，forward 取末 token 在 yes/no 上的 log-softmax，`score=exp(logprob_yes)`，按分降序重排，generator 取重排后 top-5。Rerank 与 generator 解耦，可组合 rerank×{base,RL}。
+- **RL 臂**：本工作方法 2×4 grouped GRPO + legacy_order_balance（§1）。
+
+### 2.7 顺序稳定性协议与指标
+- **3 种排列**：`forward`（原序）、`reverse`（5 篇倒序）、`shuffle`（每题固定 seed 随机重排，可复现）。temp=0。
+- 每题得 `(EM_fwd, EM_rev, EM_shuf)` 三元组 + 三条归一化答案文本。
+- **指标**（`order_stability_eval.py`，原始定义，跨族可比）：
+  - `perm_EM_{fwd,rev,shuf}`：各排列平均 EM；`AvgEM` 三者均值；`StdEM` 三者总体标准差（ddof=0）；`EMspread` = max−min。
+  - `patterns`：三元组 8 种组合计数。`111`=全对、`000`=全错。
+  - `FOCR` (Forward-Only Correct Rate) = pattern `(1,0,0)` 比 = 仅原序答对、倒序乱序均错 = **顺序过拟合直接量**，越低越好。
+  - `OCR` (Order Consistency Rate) = 三排列归一化答案**完全相同**率（全一致）。
+  - `MajOCR` (Majority OCR) = ≥2 条答案相同率（多数一致）。
+- OCR/MajOCR 基于答案文本（非 EM）：能识别"一致地答错"，与 EM 类指标互补（设计动机见 §3.3）。OVERALL = 4 数据集按题数加权合并。
+
+### 2.8 复现性与种子
+- 数据构造 seed 42；shuffle 每题 `seed+idx` 固定；eval temp=0 确定性。
+- 全部产物落 `results/`、`checkpoints/bar-rag-order/<exp>/global_step_*/actor/lora_adapter`、`merged_models/`，可本地核验。
+- 复现入口 `scripts/order_rag_pipeline.sh`（check-data / train-one[+RESUME_MODE] / merge-lora / eval），完整流程见 `skills/order-rag-experiment/SKILL.md` 与 `REPRODUCE_ORDER_RAG.md`。
+
+---
+
+## 3. 结果
+
+### 3.1 主结果：单排列 eval_1000（base vs RL 最佳，原始检索顺序）
+
+| 模型族 | base EM | RL 最佳 EM | RL 增益 | 最佳 step | 注 |
+|---|---|---|---|---|---|
+| Mistral-7B-v0.2 | 20.25 | 35.62 | +15.37 | 300 | step400+ KL 漂移退化 |
+| Llama-3.1-8B | 29.55 | 37.02 | +7.47 | 600 | 无退化 |
+| Qwen3-8B (关thinking) | 35.48 | 37.52 | +2.04 | 500 | 无退化，base 已强 |
+| Qwen3-1.7B (关thinking) | 24.50 | 30.00 | +5.50 | 600 | 无退化，容量受限 |
+
+**结论**：RL 增益与基座强度反相关；三族 RL 后收敛到 ~36–38 EM（1.7B 受容量限制 best=30.00）；**退化与否由 KL 控制**（Mistral KL~1.0 退化，Llama/Qwen3 KL~0.06–0.25 不退化）。
+
+各 checkpoint 曲线：
+- Mistral: base 20.25 | 100 31.40 | 200 35.15 | **300 35.62** | 400 34.98 | 500 34.83
+- Llama: base 29.55 | 200 34.75 | 400 36.92 | **600 37.02** | 625 36.85
+- Qwen3-8B: base 35.48 | 100 36.45 | 200 36.70 | 300 37.33 | 400 37.52 | **500 37.52**
+- Qwen3-1.7B（本次复现，逐数据集 EM/F1 见下）
+
+| ckpt | 2wiki | hotpot | nq | triviaqa | AvgEM | AvgF1 |
+|---|---|---|---|---|---|---|
+| base | 11.10/19.17 | 19.60/30.90 | 25.10/37.68 | 42.20/52.53 | 24.50 | 35.07 |
+| step200 | 16.00/22.96 | 22.30/33.02 | 28.90/40.76 | 45.30/55.18 | 28.13 | 37.98 |
+| step400 | 18.60/25.16 | 23.30/33.95 | 29.80/41.91 | 47.10/56.42 | 29.70 | 39.36 |
+| step600 | 19.50/26.03 | 23.30/33.80 | 30.00/42.41 | 47.20/56.73 | 30.00 | 39.74 |
+
+训练 reward 均值 0.21→0.37 单调上升，KL 持续极低（~0.06，无漂移→不退化）。
+
+### 3.2 Reranker baseline 对照（eval_1000）
+
+#### Mistral（Qwen3-Reranker-0.6B）
+
+| 条件 | Avg EM | Avg F1 |
+|---|---|---|
+| 原顺序+base | 20.25 | 31.80 |
+| 原顺序+RL step300 | 35.62 | 45.11 |
+| rerank+base | 22.88 | 34.51 |
+| rerank+RL step300 | 37.00 | 46.80 |
+
+reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互补近似可加）。
+
+#### 三族（Qwen3-Reranker-4B，每题 50 篇全打分取 top-5）
+
+| 模型 | 原顺序 base | 原顺序 RL-best | rerank4b+base | rerank4b+RL-best |
+|---|---|---|---|---|
+| Qwen3-1.7B | 24.50/35.07 | 30.00/39.74 | 25.50(+1.0)/36.88 | 30.48(+0.48)/40.19 |
+| Qwen3-8B | 35.48/— | 37.52/— | 36.50(+1.0)/46.33 | 37.70(+0.18)/47.90 |
+| Llama-3.1-8B | 29.55/— | 37.02/— | 30.90(+1.35)/40.06 | 38.08(+1.06)/47.65 |
+
+| 模型 | reranker 单独(base) | RL 单独 | rerank+RL 叠加 vs base |
+|---|---|---|---|
+| Qwen3-1.7B | +1.0 | +5.5 | +5.98 |
+| Qwen3-8B | +1.0 | +2.0 | +2.22 |
+| Llama-3.1-8B | +1.35 | +7.47 | +8.53 |
+
+**结论**：4 族规律一致——**RL 是主力（约 2–7× reranker），reranker 在 base 上稳定 +1–1.4 EM、在 RL 后边际收益降到 +0.2–1.1；二者互补近似可加**。强基座（Qwen3-8B）reranker 收益最小（已能利用原序 top-5），弱/中基座收益更大。
+
+### 3.3 顺序稳定性评测（3 排列：forward/reverse/shuffle）
+
+#### 为什么评 + 协议
+核心论点要求除 EM/F1 外额外评测顺序鲁棒性。每题构造 3 种排列（forward=原序、reverse=倒序、shuffle=固定 seed 随机重排），temp=0，得 (EM_fwd,EM_rev,EM_shuf) + 三条归一化答案文本。
+
+#### 指标定义（与设计动机）
+- 正确性类（EM 三元组）：`perm_EM`/`AvgEM`/`StdEM`(总体标准差)/`EMspread`(max−min)/`patterns`(8 种 (f,r,s) 组合)；`FOCR`=pattern(1,0,0) 比=仅原序答对其余错=**对检索顺序过拟合的直接量**，越低越好。
+- 一致性类（归一化答案文本，跨排列）=顺序鲁棒核心指标：`OCR`=三排列答案完全相同率（全一致）；`MajOCR`=≥2 条相同率（多数一致）。
+- 为什么文本而非 EM：EM 只刻画答对/答错翻转，识别不了"一致地答错"。弱模型可三排列全错但答案完全相同（高 OCR，能力不足而非顺序敏感）；强模型可三对但措辞不同（低 OCR，答对但有顺序措辞漂移）。两者互补。例证：mistral_base AvgEM 仅 7–20% 但 MajOCR 64、OCR 25.7——稳定地输出同一(常为空/unknown)答案，问题在能力非顺序敏感；RL 后 OCR 大涨=把"不稳定瞎答"收敛成"稳定答对"。
+
+#### OVERALL（4 数据集合并）
+
+| 模型 | AvgEM | OCR | MajOCR | FOCR |
+|---|---|---|---|---|
+| mistral_base | 19.75 | 25.7 | 64.1 | 3.2 |
+| mistral_step300 | 34.88 | 58.5(+32.8) | 89.5 | 3.0 |
+| qwen3-1p7b_base | 23.60 | 36.4 | 75.3 | 3.1 |
+| qwen3-1p7b_step600 | 29.10 | 46.25(+9.9) | 85.0 | 3.0 |
+| llama31-8b_base† | 33.23 | 40.2 | 79.95 | 4.15 |
+| llama31-8b_step600† | 39.31 | 51.0(+10.8) | 87.45 | 3.33 |
+| qwen3_base | 34.69 | 54.5 | 87.9 | 2.8 |
+| qwen3_step500 | 36.91 | 58.9(+4.4) | 90.8 | 2.5 |
+
+† Llama 顺序稳定性用 raw-prompt3（无 chat template，与 mistral 一致）；其 forward AvgEM 比 chat-template 主评测（base 29.55 / step600 37.02）高约 2.9–4.6。OCR/MajOCR/FOCR 为顺序敏感性指标，raw 下内部自洽、跨族可比。
+
+8 模式分布 %（111 全对 / 000 全错 / 100 仅 fwd / 其他）：
+
+| 模型 | 111 | 000 | FOCR | 其他 |
+|---|---|---|---|---|
+| mistral_base | 11.6 | 71.8 | 3.2 | 13.4 |
+| mistral_step300 | 28.5 | 58.5 | 3.0 | 9.9 |
+| qwen3-1p7b_base | 16.7 | 69.1 | 3.1 | 11.1 |
+| qwen3-1p7b_step600 | 21.7 | 63.2 | 3.0 | 12.1 |
+| llama31-8b_base† | 23.4 | 56.5 | 4.2 | 15.9 |
+| llama31-8b_step600† | 30.1 | 51.7 | 3.3 | 14.9 |
+| qwen3_base | 28.0 | 58.5 | 2.8 | 10.6 |
+| qwen3_step500 | 30.4 | 56.8 | 2.5 | 10.3 |
+
+**结论**：RL 后 OCR/MajOCR 显著上升，000(全错)→111(全对) 迁移，FOCR 维持 ~3% 且略降（没加剧顺序过拟合）。OCR 增益与基座强度反相关：mistral 25.7→+32.8 > Llama 40.2→+10.8 ≈ 1.7B 36.4→+9.9 > 8B 54.5→+4.4，单调。
+
+---
+
+## 4. 消融实验库存
+
+> 区分"已做"（有 `results/` 产物可验）、"已配置未跑"、"历史 exp.md（eval_512，产物丢失，仅引用）"。
+
+### 4.1 已做的消融/对比
+1. **base vs RL（主线 reward）**：4 族 base→RL-best，单排列 EM/F1（§3.1）。→ RL 增益与基座强度反相关、KL 控退化。
+2. **顺序扰动 vs 顺序鲁棒（order stability）**：4 族 base/RL 在 forward/reverse/shuffle 上的 OCR/MajOCR/FOCR/patterns（§3.3）。→ RL 提顺序一致性、不加剧 FOCR。
+3. **reranker vs RL vs 叠加**：4 族原顺序/rerank × base/RL（§3.2）。→ RL 是主力，reranker 边际、互补可加。
+4. **跨模型族**：Mistral/Llama/Qwen3-8B/Qwen3-1.7B 四族横向（强弱基座、不同家族、是否 thinking）。
+5. **KL 退化分析**：Mistral(KL~1.0 退化) vs Llama/Qwen3(KL~0.06–0.25 不退化)。
+6. **checkpoint 曲线**：每族多 step（100–625），观察增益平台/退化拐点。
+
+### 4.2 已配置、尚未跑
+- **Reward 消融**（`configs/ablation_matrix.tsv`，Qwen3-1.7B 上 base / legacy_order_balance / pv 三种 reward，同数据同超参，仅 reward 变）——**未执行**，无 checkpoint/结果。这是隔离 reward 贡献的关键实验，建议优先补。
+- **four_orders（4×2）消融**：数据构造脚本已支持 `forward+reverse+random+answer_late`，对应 `rollout.n=2`；未跑。
+- **Llama 顺序稳定性 chat-template 对齐**：当前 Llama orderstab 用 raw-prompt3（OCR/MajOCR 自洽但 forward EM 与主评测差 ~2.9–4.6）；可选重跑加 chat template 对齐。
+
+### 4.3 历史实验（exp.md，eval_512，本地不可复现，仅作佐证）
+| 实验 | 含义 |
+|---|---|
+| `ordered rollout8` | 保持原序，rollout n=8，reward 逐样本 |
+| `unordered rollout8` | forward/reverse 增强，reward 仍逐样本 |
+| `unordered_n4 / 2×4` | forward+reverse 各 n=4，总预算≈rollout8 |
+| `order_reward` | 2×4 + 粗粒度顺序加权 |
+| `flip_penalty` | 惩罚 harmful flip |
+| `order_balance` | 弱顺序奖励 + harmful flip 惩罚 + 强顺序降权（本工作 legacy_order_balance 的原型） |
+
+历史结论（exp.md，Qwen3-1.7B/4B/8B、Qwen2.5-3B/7B）：2×4 多数只算 order augmentation（主指标涨但 random10 flip rate 不降）；简单 order_reward/flip_penalty 收益很小；order_balance 在 Qwen2.5-3B 上是唯一明显成功的 reward 改动。这些佐证了"需 group-level 一致性 reward"的动机，但**数值不可与本次 eval_1000 主表直接混用**。
+
+---
+
+## 5. 分析与结论
+
+1. **主线方法有效**：2×4 grouped GRPO + legacy_order_balance 在 4 族上稳定带来 RL 增益（+2.0 ~ +15.4 EM），且低 KL 族不退化。
+2. **顺序鲁棒性确实提升**：RL 后 OCR 单调提升、000→111 迁移、FOCR 不增，证明不是单纯过拟合原序；OCR 增益与基座强度反相关（越弱越敏感→RL 收益越大）。
+3. **RL vs reranker**：RL 是主力（2–7×），reranker 边际且互补可加。说明"训练 generator 对顺序鲁棒"比"重排检索"收益大得多。
+4. **退化由 KL 控制**：Mistral KL~1.0 在 step400+ 退化，其余 KL<0.25 不退化——可作早停/正则信号。
+5. **缺口**：reward 消融（base/legacy/pv）未跑，目前"order-consistency reward 的边际贡献"仅由历史 exp.md + 训练 reward 曲线间接支撑，需补 §4.2 第 1 项才能严格成立。
+
+---
+
+## 6. 进行中 / 待办
+
+- **Gemma2-9B-IT**：续训中（因中途误断已 `RESUME_MODE=auto` 从 step200 恢复，恢复 model/optim/lr_scheduler/rng 全状态），step 200→625，~58 s/it，ETA ~6.8h；完成后自动 eval_1000 + 顺序稳定性 + rerank4b（均 max_model_len=8192）。注：首版下错成 base 非-instruct 已清理重训；IT 起步 reward 0.2、resp_len ~50，正常。
+- **Reward 消融**（§4.2）：建议 Qwen3-1.7B 上跑 base / legacy / pv 三组，隔离 reward 贡献。
+- **four_orders 4×2 消融**、**Llama orderstab chat-template 对齐**：可选。
+
+---
+
+## 7. 产物与复现
+
+- 主结果：`results/eval1000_*/`、`results/{llama,qwen3}_evalout/`、`results/eval1000_qwen3-1p7b_*`
+- reranker：`results/eval1000_rerank*`、`data/dynamicrag/normalized/eval_1000_rerank4b/`
+- 顺序稳定性：`results/orderstab/*_summary.json`、`scripts/order_stability_eval.py`
+- 训练 checkpoint：`checkpoints/bar-rag-order/<exp>/global_step_*/actor/lora_adapter`
+- 合并模型：`merged_models/order-balance-*-step*`
+- 核心 reward：`verl/utils/reward_score/order_consistency.py`、GRPO 分组 patch：`verl/trainer/ppo/ray_trainer.py::_build_training_uids`、数据构造：`examples/build_order_generator_data.py`
+- 复现入口：`scripts/order_rag_pipeline.sh`（check-data / train-one / merge-lora / eval），详见 `skills/order-rag-experiment/SKILL.md` 与 `REPRODUCE_ORDER_RAG.md`
