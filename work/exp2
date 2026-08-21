@@ -1,6 +1,6 @@
 # Order-RAG 实验总结（方法 + 结果 + 消融 + 分析）
 
-> 主表数据均来自 **DynamicRAG eval_1000**（top-5 检索证据，4 数据集 2wiki/hotpot/nq/triviaqa），本会话用重建后的代码复现、产物落 `results/` 可本地核验。历史 exp.md 的老实验（eval_512，原始产物已丢失）仅作佐证引用。Gemma2-9B-IT 训练进行中。
+> 主表数据均来自 **DynamicRAG eval_1000**（top-5 检索证据，4 数据集 2wiki/hotpot/nq/triviaqa），本会话用重建后的代码复现、产物落 `results/` 可本地核验。历史 exp.md 的老实验（eval_512，原始产物已丢失）仅作佐证引用。5 模型族（Mistral-7B / Llama-3.1-8B / Qwen3-8B / Qwen3-1.7B / Gemma2-9B-IT）均已复现完成。
 
 ---
 
@@ -8,7 +8,7 @@
 
 普通 unordered RAG 的 RL 微调多数只是 **order augmentation**（让模型见过不同文档顺序），而**不是真正的 order-invariance optimization**（让模型在不同顺序下稳定输出同一答案）。前者只提升"在见过的排列上答对"，reward 仍逐样本算，从不告诉模型"同一题不同顺序应一致"。
 
-本工作在 BAR-RAG 两阶段框架上做顺序鲁棒 generator：构造同题的 forward/reverse 两种文档顺序、用 `order_group_uid` 把它们绑进**同一个 GRPO advantage 组**，并设计 **group-level order-consistency reward**，使训练目标从"每排列尽量答对"升级为"同题跨排列一致且答对"。我们用 4 个模型族 + reranker baseline + 顺序稳定性评测来验证。
+本工作在 BAR-RAG 两阶段框架上做顺序鲁棒 generator：构造同题的 forward/reverse 两种文档顺序、用 `order_group_uid` 把它们绑进**同一个 GRPO advantage 组**，并设计 **group-level order-consistency reward**，使训练目标从"每排列尽量答对"升级为"同题跨排列一致且答对"。我们用 5 个模型族（Mistral-7B / Llama-3.1-8B / Qwen3-8B / Qwen3-1.7B / Gemma2-9B-IT）+ reranker baseline + 顺序稳定性评测（含 HCF）来验证。
 
 ---
 
@@ -65,7 +65,7 @@ R_pv = base + α(0.30)·base·paired_mean − β(0.20)·|base − paired_mean|
 | llama31-8b | Llama-3.1-8B-Instruct | 8B | yes | bf16 | 128k | n/a | `/ainative/.../LLM-Research/Llama-3.1-8B-Instruct` |
 | qwen3-8b | Qwen3-8B | 8B | yes(hybrid) | bf16 | 128k | **关** | `/ainative/.../Qwen/Qwen3-8B` |
 | qwen3-1p7b | Qwen3-1.7B | 1.7B | yes(hybrid) | bf16 | 32k | **关** | `/ainative/.../Qwen/Qwen3-1.7B` |
-| gemma2-9b-it | Gemma2-9B-IT | 9B | yes | bf16 | **8192** | n/a | `/home/admin/gemma-2-9b-it`（进行中） |
+| gemma2-9b-it | Gemma2-9B-IT | 9B | yes | bf16 | **8192** | n/a | `/home/admin/gemma-2-9b-it`（完成） |
 
 Qwen3 系默认带 hybrid-thinking，训练/评测统一 `enable_thinking=False`（输出直接 `<evidence>/<answer>`，不吐 `◷` 思考链）。Gemma2 上下文硬上限 8192，其所有评测 `max_model_len=8192`。
 
@@ -137,6 +137,7 @@ Qwen3 系默认带 hybrid-thinking，训练/评测统一 `enable_thinking=False`
   - `FOCR` (Forward-Only Correct Rate) = pattern `(1,0,0)` 比 = 仅原序答对、倒序乱序均错 = **顺序过拟合直接量**，越低越好。
   - `OCR` (Order Consistency Rate) = 三排列归一化答案**完全相同**率（全一致）。
   - `MajOCR` (Majority OCR) = ≥2 条答案相同率（多数一致）。
+  - `HCF` (Harmful order-Change Flip) = `P(reverse 错 | forward 对) = N(f=1∧r=0)/N(f=1)`，只看 forward↔reverse 这一对（2×4 训练实际绑定共享 `order_group_uid` 的那一对）。分子=`pattern(1,0,0)+(1,0,1)`，分母=所有 f=1 的 patterns 之和。越低越顺序鲁棒；结果见 §3.4。
 - OCR/MajOCR 基于答案文本（非 EM）：能识别"一致地答错"，与 EM 类指标互补（设计动机见 §3.3）。OVERALL = 4 数据集按题数加权合并。
 
 ### 2.8 复现性与种子
@@ -156,8 +157,9 @@ Qwen3 系默认带 hybrid-thinking，训练/评测统一 `enable_thinking=False`
 | Llama-3.1-8B | 29.55 | 37.02 | +7.47 | 600 | 无退化 |
 | Qwen3-8B (关thinking) | 35.48 | 37.52 | +2.04 | 500 | 无退化，base 已强 |
 | Qwen3-1.7B (关thinking) | 24.50 | 30.00 | +5.50 | 600 | 无退化，容量受限 |
+| Gemma2-9B-IT | 28.30 | 40.27 | +11.97 | 400 | 增益大；step600 微回落(40.02)，KL 低不退化 |
 
-**结论**：RL 增益与基座强度反相关；三族 RL 后收敛到 ~36–38 EM（1.7B 受容量限制 best=30.00）；**退化与否由 KL 控制**（Mistral KL~1.0 退化，Llama/Qwen3 KL~0.06–0.25 不退化）。
+**结论**：RL 增益与基座强度大致反相关（弱/中基座吃收益更多）；Gemma2-9B-IT 是增益第二大的族（+11.97，仅次于 Mistral +15.37），其中 2wiki 多跳从 base 7.40 跃到 step400 30.50（+23.1）最为显著。**退化与否由 KL 控制**（Mistral KL~1.0 退化，其余族 KL 低不退化）。
 
 各 checkpoint 曲线：
 - Mistral: base 20.25 | 100 31.40 | 200 35.15 | **300 35.62** | 400 34.98 | 500 34.83
@@ -174,6 +176,17 @@ Qwen3 系默认带 hybrid-thinking，训练/评测统一 `enable_thinking=False`
 
 训练 reward 均值 0.21→0.37 单调上升，KL 持续极低（~0.06，无漂移→不退化）。
 
+Gemma2-9B-IT（本次复现，逐数据集 EM/F1，eval_1000 原顺序，chat template，max_model_len=8192）：
+
+| ckpt | 2wiki | hotpot | nq | triviaqa | AvgEM | AvgF1 |
+|---|---|---|---|---|---|---|
+| base | 7.40/13.16 | 21.70/32.06 | 35.40/47.57 | 48.70/60.37 | 28.30 | 38.29 |
+| step200 | 27.00/32.79 | 31.70/43.59 | 39.70/51.76 | 57.20/66.55 | 38.90 | 48.67 |
+| step400 | 30.50/35.80 | 32.40/44.38 | 39.10/51.67 | 59.10/68.12 | **40.27** | 49.45 |
+| step600 | 30.20/35.51 | 32.40/44.55 | 38.70/51.69 | 58.80/68.05 | 40.02 | 49.45 |
+
+注：Gemma2-9B-IT 训练中途(step273)因 cgroup 内存 OOM 崩过一次（9B+激进 vLLM 设置致 GPU 碎片化），改 `gpu_util 0.35 + enforce_eager + prefill 16384 + ref 放 GPU` 后 `RESUME_MODE=auto` 从 step200 续训，稳定 ~60 s/it 跑完。RL 后 plateau ~40 EM、低 KL 不退化；2wiki 多跳增益最大（+23）。
+
 ### 3.2 Reranker baseline 对照（eval_1000）
 
 #### Mistral（Qwen3-Reranker-0.6B）
@@ -187,21 +200,23 @@ Qwen3 系默认带 hybrid-thinking，训练/评测统一 `enable_thinking=False`
 
 reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互补近似可加）。
 
-#### 三族（Qwen3-Reranker-4B，每题 50 篇全打分取 top-5）
+#### 四族（Qwen3-Reranker-4B，每题 50 篇全打分取 top-5）
 
 | 模型 | 原顺序 base | 原顺序 RL-best | rerank4b+base | rerank4b+RL-best |
 |---|---|---|---|---|
 | Qwen3-1.7B | 24.50/35.07 | 30.00/39.74 | 25.50(+1.0)/36.88 | 30.48(+0.48)/40.19 |
 | Qwen3-8B | 35.48/— | 37.52/— | 36.50(+1.0)/46.33 | 37.70(+0.18)/47.90 |
 | Llama-3.1-8B | 29.55/— | 37.02/— | 30.90(+1.35)/40.06 | 38.08(+1.06)/47.65 |
+| Gemma2-9B-IT | 28.30/38.29 | 40.27/49.45 | 29.45(+1.15)/39.65 | 40.60(+0.58)/50.77 |
 
 | 模型 | reranker 单独(base) | RL 单独 | rerank+RL 叠加 vs base |
 |---|---|---|---|
 | Qwen3-1.7B | +1.0 | +5.5 | +5.98 |
 | Qwen3-8B | +1.0 | +2.0 | +2.22 |
 | Llama-3.1-8B | +1.35 | +7.47 | +8.53 |
+| Gemma2-9B-IT | +1.15 | +11.97 | +12.30 |
 
-**结论**：4 族规律一致——**RL 是主力（约 2–7× reranker），reranker 在 base 上稳定 +1–1.4 EM、在 RL 后边际收益降到 +0.2–1.1；二者互补近似可加**。强基座（Qwen3-8B）reranker 收益最小（已能利用原序 top-5），弱/中基座收益更大。
+**结论**：5 族规律一致——**RL 是主力（约 2–10× reranker），reranker 在 base 上稳定 +1–1.4 EM、在 RL 后边际收益降到 +0.2–1.1；二者互补近似可加**。强基座（Qwen3-8B）reranker 收益最小（已能利用原序 top-5），弱/中基座收益更大；Gemma2-9B-IT 叠加后绝对 AvgEM 40.60 为五族最高（其 RL-best 本就最高 40.27）。
 
 ### 3.3 顺序稳定性评测（3 排列：forward/reverse/shuffle）
 
@@ -225,6 +240,8 @@ reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互�
 | llama31-8b_step600† | 39.31 | 51.0(+10.8) | 87.45 | 3.33 |
 | qwen3_base | 34.69 | 54.5 | 87.9 | 2.8 |
 | qwen3_step500 | 36.91 | 58.9(+4.4) | 90.8 | 2.5 |
+| gemma2-9b-it_base | 28.24 | 48.17 | 85.80 | 2.70 |
+| gemma2-9b-it_step600 | 39.75 | 61.60(+13.43) | 91.97 | 2.58 |
 
 † Llama 顺序稳定性用 raw-prompt3（无 chat template，与 mistral 一致）；其 forward AvgEM 比 chat-template 主评测（base 29.55 / step600 37.02）高约 2.9–4.6。OCR/MajOCR/FOCR 为顺序敏感性指标，raw 下内部自洽、跨族可比。
 
@@ -240,8 +257,24 @@ reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互�
 | llama31-8b_step600† | 30.1 | 51.7 | 3.3 | 14.9 |
 | qwen3_base | 28.0 | 58.5 | 2.8 | 10.6 |
 | qwen3_step500 | 30.4 | 56.8 | 2.5 | 10.3 |
+| gemma2-9b-it_base | 21.8 | 65.2 | 2.7 | 10.3 |
+| gemma2-9b-it_step600 | 33.7 | 54.2 | 2.6 | 9.5 |
 
-**结论**：RL 后 OCR/MajOCR 显著上升，000(全错)→111(全对) 迁移，FOCR 维持 ~3% 且略降（没加剧顺序过拟合）。OCR 增益与基座强度反相关：mistral 25.7→+32.8 > Llama 40.2→+10.8 ≈ 1.7B 36.4→+9.9 > 8B 54.5→+4.4，单调。
+**结论**：RL 后 OCR/MajOCR 显著上升，000(全错)→111(全对) 迁移，FOCR 维持 ~3% 且略降（没加剧顺序过拟合）。OCR 增益与基座强度反相关：mistral 25.7→+32.8 > Gemma2 48.2→+13.4 > Llama 40.2→+10.8 ≈ 1.7B 36.4→+9.9 > 8B 54.5→+4.4，单调；Gemma2-9B-IT 的 111 全对率 base 21.8%→step600 33.7%（迁移最显著之一）。
+
+### 3.4 HCF（Harmful order-Change Flip）= P(reverse 错 | forward 对)
+
+只看 forward↔reverse 这一对（2×4 训练里实际共享 `order_group_uid` 绑定的那一对），衡量"原序答对但一倒过来就答错"的条件率——本工作要降低的"顺序过拟合"最直接量。越低越好。
+
+| 模型 | base HCF | RL-best HCF | ΔHCF | base forward EM |
+|---|---|---|---|---|
+| Mistral-7B | 32.29 | 14.97 | **−17.32** | 20.05 |
+| Qwen3-1.7B | 23.93 | 18.31 | −5.62 | 35.40 |
+| Llama-3.1-8B† | 23.12 | 17.99 | −5.13 | 34.17 |
+| Gemma2-9B-IT | 18.02 | 11.99 | **−6.03** | 29.00 |
+| Qwen3-8B | 16.03 | 13.49 | −2.54 | 37.43 |
+
+**结论**：RL 在**全 5 族都降低 HCF**（harmful flip 一律减少），且降幅与基座顺序敏感度单调相关——越敏感的基座（Mistral base HCF 32.3）RL 降幅越大（−17.3），最不敏感的 Qwen3-8B（base 16.0）降幅最小（−2.5）。这直接证明 group-level order-consistency reward 把"原序答对、倒序答错"的样本转化成"两序都答对"，而非仅过拟合原序。Gemma2-9B-IT 的 RL-best HCF 11.99 为五族最低（RL 后最不容易因顺序翻转而出错）。
 
 ---
 
@@ -250,10 +283,10 @@ reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互�
 > 区分"已做"（有 `results/` 产物可验）、"已配置未跑"、"历史 exp.md（eval_512，产物丢失，仅引用）"。
 
 ### 4.1 已做的消融/对比
-1. **base vs RL（主线 reward）**：4 族 base→RL-best，单排列 EM/F1（§3.1）。→ RL 增益与基座强度反相关、KL 控退化。
-2. **顺序扰动 vs 顺序鲁棒（order stability）**：4 族 base/RL 在 forward/reverse/shuffle 上的 OCR/MajOCR/FOCR/patterns（§3.3）。→ RL 提顺序一致性、不加剧 FOCR。
-3. **reranker vs RL vs 叠加**：4 族原顺序/rerank × base/RL（§3.2）。→ RL 是主力，reranker 边际、互补可加。
-4. **跨模型族**：Mistral/Llama/Qwen3-8B/Qwen3-1.7B 四族横向（强弱基座、不同家族、是否 thinking）。
+1. **base vs RL（主线 reward）**：5 族 base→RL-best，单排列 EM/F1（§3.1）。→ RL 增益与基座强度反相关、KL 控退化。
+2. **顺序扰动 vs 顺序鲁棒（order stability）**：5 族 base/RL 在 forward/reverse/shuffle 上的 OCR/MajOCR/FOCR/patterns（§3.3）+ HCF（§3.4）。→ RL 提顺序一致性、不加剧 FOCR、降低 HCF。
+3. **reranker vs RL vs 叠加**：5 族原顺序/rerank × base/RL（§3.2）。→ RL 是主力，reranker 边际、互补可加。
+4. **跨模型族**：Mistral/Llama/Qwen3-8B/Qwen3-1.7B/Gemma2-9B-IT 五族横向（强弱基座、不同家族、是否 thinking、不同上下文长度）。
 5. **KL 退化分析**：Mistral(KL~1.0 退化) vs Llama/Qwen3(KL~0.06–0.25 不退化)。
 6. **checkpoint 曲线**：每族多 step（100–625），观察增益平台/退化拐点。
 
@@ -278,7 +311,7 @@ reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互�
 
 ## 5. 分析与结论
 
-1. **主线方法有效**：2×4 grouped GRPO + legacy_order_balance 在 4 族上稳定带来 RL 增益（+2.0 ~ +15.4 EM），且低 KL 族不退化。
+1. **主线方法有效**：2×4 grouped GRPO + legacy_order_balance 在 5 族上稳定带来 RL 增益（+2.0 ~ +15.4 EM，Gemma2-IT +11.97 为第二大），且低 KL 族不退化。
 2. **顺序鲁棒性确实提升**：RL 后 OCR 单调提升、000→111 迁移、FOCR 不增，证明不是单纯过拟合原序；OCR 增益与基座强度反相关（越弱越敏感→RL 收益越大）。
 3. **RL vs reranker**：RL 是主力（2–7×），reranker 边际且互补可加。说明"训练 generator 对顺序鲁棒"比"重排检索"收益大得多。
 4. **退化由 KL 控制**：Mistral KL~1.0 在 step400+ 退化，其余 KL<0.25 不退化——可作早停/正则信号。
@@ -288,9 +321,10 @@ reranker +2.62；RL +15.38；叠加 +16.75（RL 是主力 ≈6× reranker，互�
 
 ## 6. 进行中 / 待办
 
-- **Gemma2-9B-IT**：续训中（因中途误断已 `RESUME_MODE=auto` 从 step200 恢复，恢复 model/optim/lr_scheduler/rng 全状态），step 200→625，~58 s/it，ETA ~6.8h；完成后自动 eval_1000 + 顺序稳定性 + rerank4b（均 max_model_len=8192）。注：首版下错成 base 非-instruct 已清理重训；IT 起步 reward 0.2、resp_len ~50，正常。
+- **Gemma2-9B-IT**：已完成。训练中途(step273)因 cgroup 内存 OOM 崩过一次（9B+激进 vLLM 致 GPU 显存碎片化），改保守配置(`gpu_util 0.35 + enforce_eager + prefill 16384 + ref 放 GPU`)后 `RESUME_MODE=auto` 从 step200 续训，625 步跑完。eval_1000 + 顺序稳定性 + rerank4b 均用 max_model_len=8192。注：首版下错成 base 非-instruct（回显 prompt、EM≈0）已清理重训为 IT 版。
 - **Reward 消融**（§4.2）：建议 Qwen3-1.7B 上跑 base / legacy / pv 三组，隔离 reward 贡献。
 - **four_orders 4×2 消融**、**Llama orderstab chat-template 对齐**：可选。
+- **HCF（Harmful order-Change Flip）指标**【已完成】：定义 `HCF = P(reverse 错 | forward 对) = N(f=1∧r=0)/N(f=1)`，只看 forward↔reverse 对（2×4 训练实际绑定的一对），由 orderstab 三元组 patterns 后验算出。对全 5 族 base/RL-best 已算完，结果见 §3.4：RL 在全 5 族都降低 HCF（Mistral −17.3 > Gemma2 −6.0 ≈ 1.7B −5.6 > Llama −5.1 > Qwen3-8B −2.5），直接证明 group-level reward 把"原序对/倒序错"转成"两序都对"。
 
 ---
 
