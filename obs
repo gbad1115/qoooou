@@ -1,0 +1,236 @@
+请基于当前项目已有的 RAG evaluation pipeline，实现一个 **Top-5 evidence 全排列顺序敏感性诊断实验**。本实验**只做 inference，不进行训练**，目标是验证：
+
+1. evidence 排序变化越大，是否越容易导致模型性能下降；
+2. Reverse order 是否经常处于全部 permutation 中的 harmful tail，从而支撑其作为 **maximum-ranking-displacement counterfactual** 的合理性。
+
+### 实验设置
+
+* 从 validation set 随机采样 **200–500 个 questions**。
+* 只使用 **一个 backbone**，优先使用当前主实验模型。
+* 对每个 question 固定 Retriever 得到的 **Top-5 passages**：
+  [
+  [d_1,d_2,d_3,d_4,d_5]
+  ]
+* passage membership 必须始终保持不变。
+* 枚举这 5 个 passages 的全部：
+  [
+  5!=120
+  ]
+  种 permutations。
+* 所有 permutation 使用完全相同的：
+
+  * model checkpoint
+  * prompt template
+  * generation parameters
+  * decoding method
+  * gold answer aliases
+* 推荐使用 greedy decoding，避免 sampling noise。
+
+### 对每个 question × permutation 保存
+
+输出 CSV，每一行为一个 permutation，至少包含：
+
+```text
+question_id
+permutation
+kendall_distance
+normalized_kendall_distance
+em
+f1
+base_reward
+reward_drop
+harmful_flip
+is_retrieval
+is_reverse
+```
+
+其中：
+
+**1. Kendall distance**
+
+计算当前 permutation 相对于原始 retrieval order `[1,2,3,4,5]` 的 Kendall inversion distance。
+
+Top-5 范围为：
+
+[
+0\le d_K\le10
+]
+
+并计算 normalized distance：
+
+[
+\tilde d_K=d_K/10
+]
+
+Retrieval order 为 0，Reverse `[5,4,3,2,1]` 必须为 10（normalized = 1）。
+
+**2. EM / F1 / Base Reward**
+
+使用项目当前已有 QA evaluation 逻辑。
+
+如果已有论文中的 base reward 实现，则直接复用：
+
+```text
+R_qa = 0.7 * F1 + 0.3 * EM
+R_base = 0.8 * R_qa + 0.2 * R_cite
+```
+
+不要重新修改 reward 定义。
+
+**3. Reward Drop**
+
+相对于同一个 question 的 retrieval order：
+
+[
+\Delta R(q,\pi)
+===============
+
+R(q,\pi_{retrieval})-R(q,\pi)
+]
+
+数值越大表示该 permutation 越 harmful。
+
+**4. Harmful Flip**
+
+仅当 retrieval order 原本回答正确时：
+
+```text
+retrieval EM = 1
+当前 permutation EM = 0
+```
+
+定义：
+
+```text
+harmful_flip = 1
+```
+
+否则为 0。
+
+### Analysis 1：Ranking displacement vs failure
+
+只对 retrieval-order-correct questions 进行 HCF 分析。
+
+按 Kendall distance：
+
+```text
+0, 1, 2, ..., 10
+```
+
+聚合所有 permutations，计算：
+
+```text
+HCF(distance)
+mean reward_drop(distance)
+mean F1_drop(distance)
+```
+
+生成两张图：
+
+**Figure A**
+
+```text
+x = Normalized Kendall distance
+y = Mean reward degradation
+```
+
+**Figure B**
+
+```text
+x = Normalized Kendall distance
+y = Harmful Flip Rate (%)
+```
+
+并判断是否整体表现为：
+
+```text
+larger ranking displacement
+→ larger behavioral degradation
+```
+
+### Analysis 2：相关性
+
+不要简单把所有 questions 混在一起计算一次 correlation。
+
+对每个 question 单独计算：
+
+[
+\rho_q=
+SpearmanCorr(
+KendallDistance,
+RewardDrop
+)
+]
+
+最后报告：
+
+```text
+mean Spearman rho
+median Spearman rho
+bootstrap 95% CI
+positive-rho question ratio
+```
+
+### Analysis 3：Reverse harmful percentile
+
+对每个 retrieval-order-correct question：
+
+1. 排除 retrieval order；
+2. 剩余 119 个 permutations；
+3. 按 `reward_drop` 从大到小排序；
+4. 找到 reverse `[5,4,3,2,1]` 的排名；
+5. 转成 harmful percentile。
+
+Reverse 越接近 100 percentile，说明它越接近 harmful tail。
+
+最终报告：
+
+```text
+mean reverse harmful percentile
+median reverse harmful percentile
+Tail@5%
+Tail@10%
+Tail@20%
+```
+
+例如 `Tail@10%` 表示：
+
+> 有多少比例的问题中，Reverse 位于全部 119 个 counterfactual permutations 中最 harmful 的前 10%。
+
+同时比较：
+
+```text
+Reverse HCF
+Average permutation HCF
+Random permutation HCF
+```
+
+### 最终输出
+
+请生成：
+
+```text
+results/
+├── permutation_level_results.csv
+├── question_level_summary.csv
+├── distance_bucket_summary.csv
+├── reverse_tail_analysis.csv
+├── kendall_vs_reward_drop.pdf
+├── kendall_vs_hcf.pdf
+└── analysis_summary.md
+```
+
+`analysis_summary.md` 中重点回答两个 Research Questions：
+
+**RQ1.**
+Does larger ranking displacement tend to expose stronger order-conditioned behavioral degradation?
+
+**RQ2.**
+Does reverse ordering consistently fall into the harmful tail of the permutation space, making it a useful single structured counterfactual for training?
+
+注意：
+
+* 不要预设 Reverse 一定是 worst permutation。
+* 不要为了支持 hypothesis 筛选结果。
+* 如果 Kendall distance 和 behavioral degradation 没有明显正相关，需要如实报告。
+* Reverse 的理论保证仅限于：**它最大化相对于 retrieval order 的 Kendall ranking displacement**；是否对应 behavioral worst case 必须由本实验验证。
