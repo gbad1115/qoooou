@@ -147,6 +147,7 @@ bash scripts/run.sh -m torch.distributed.run --nproc_per_node=8 \
   1. 76K 训练只跑了 2000 step（约 0.85 epoch），且 step~1570 有过 loss 尖峰，best 停得早——训练不充分
   2. 训练语料里 ChartQA 类数据占比低，分布不匹配
   3. 高剪枝率（p90）下 32 行 lookahead 容量不足
+<img width="662" height="389" alt="image" src="https://github.com/user-attachments/assets/a56c924c-20c3-4b8c-984b-2a220cbb0792" />
 
 
 ```text
