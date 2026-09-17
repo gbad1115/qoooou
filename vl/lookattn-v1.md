@@ -15,10 +15,7 @@
 |---|---|---|
 | Python 环境 | `/ossfs/workspace/HAWK/.venv`（Python 3.10.13） | **未按 README 建 conda**；venv 基础依赖与 requirements.txt 完全对齐（torch 2.5.1 / torchvision 0.20.1 / accelerate 1.4.0 / Pillow 11.0.0 / numpy 1.26.4 / qwen-vl-utils 0.0.11） |
 | 补丁运行时 | `.runtime/python`（`HAWK 0.1.0 Transformers 4.52.0` 校验通过） | 所有入口仍必须走 `bash scripts/run.sh` |
-| 模型 | `/home/admin/Qwen2.5-VL-7B-Instruct`（16 GB 完整），软链 `models/Qwen2.5-VL-7B-Instruct` | 经 aistudio modelhub 内网同步（16.6 GB 仅 9 秒） |
-| 评测依赖 | venv 已含 ms-vlmeval 0.0.18 / pandas / pyarrow / openpyxl / xlsxwriter | `requirements-eval.txt` 无需再装 |
-| GPU | 8 × NVIDIA H20-3e（143 GB/卡），192 核 CPU，1.5 TiB 内存 | |
-| 存储 | `/ossfs` 为阿里云 NAS（NFSv3）；模型在本地盘 `/home/admin` | NAS 小文件 I/O 慢：冷 import transformers ~5 min（8 路并发 ~10 min）；tar 选择性解压 ~0.3 s/文件 |
+
 
 ## 2. 快速验证：单图推理（README 第 4 节）✅
 
