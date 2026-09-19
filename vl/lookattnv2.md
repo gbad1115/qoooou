@@ -284,6 +284,8 @@ GPU backward 原子序不确定性，非本改动引入）。
 
 （val KL 从 step ~800 起就在 0.4548~0.4605 平台化；1 epoch 欠训于 10K 的 6.4 epoch 属预期。）
 
+<img width="624" height="375" alt="image" src="https://github.com/user-attachments/assets/dfbc6576-4795-4f45-8713-c1c3a7e235e9" />
+
 **端到端**（VLMEvalKit，与 §9 完全同口径；`vlmeval_results/mix86k_*`）：
 
 | 数据集 | 档位 | HAWK | 10K | 76K | **86K** |
