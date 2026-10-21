@@ -1,10 +1,12 @@
-Numerous visual token pruning methods reduce computational and memory costs by identifying and removing redundant visual tokens. Existing methods
-can be classified into three categories: similarity-based, attention-based, and attention&similarity-based. Similarity-based methods measure 
-  ▎ similarity among visual tokens to remove redundant ones~\cite{divprune,dart,holov}, while attention-based methods typically use attention scores 
-  ▎ derived from the user instruction to estimate token importance~\cite{fastv,sparsevlm,hawk}. However, similarity-based methods are 
-  ▎ question-agnostic and may overlook image details that only the question makes relevant, whereas attention scores are usually read from the early 
-  ▎ layers of the LLM (e.g., layer 2 in FastV~\cite{fastv}), where attention is dominated by locality and attention-sink 
-  ▎ patterns~\cite{attn_sink,vit_register} rather than by where the answer evidence lies. Although attention&similarity-based methods partially 
-  ▎ alleviate these issues, they rely on heuristic fusion designs and achieve limited performance gains~\cite{visionzip,cdpruner}. This raises a 
-  ▎ question that has not been systematically answered: \emph{is attention an inadequate signal for visual token selection, or has it simply been 
-  ▎ read at the wrong depth?}
+To overcome these limitations, we introduce a learnable strategy for visual token pruning that replaces heuristic scoring rules, aiming at more
+  accurate and robust token importance estimation. Our design is motivated by an empirical observation: attention scores computed in the deep layers
+  of the LLM provide a substantially more reliable signal of visual token importance; however, directly computing these scores requires an additional
+  full prefilling pass, which incurs extra computational and memory costs and undermines the very efficiency that token pruning aims for. To resolve
+  this dilemma, we propose \textbf{DAS} (\textbf{D}eep \textbf{A}ttention \textbf{S}urrogate), a lightweight, plug-and-play framework that predicts
+  deep-layer attention scores to guide visual token pruning. Specifically, we first identify a small subset of visual attention heads whose
+  last-layer attention faithfully localizes query-relevant visual evidence, and use their scores as supervision signals. DAS is then trained to
+  predict these scores directly from the input visual and textual features, enabling query-aware token importance estimation at negligible cost
+  without explicitly computing deep-layer attention. In addition, DAS introduces a boundary-aware distillation loss that concentrates supervision on
+  tokens near the retention threshold, where estimation errors most affect the pruned context. Extensive experiments on XX benchmarks demonstrate
+  that DAS consistently outperforms state-of-the-art pruning methods under identical retention budgets, improving over
+  VisionSelector~\cite{visionselector} by XX\% on ChartQA and XX\% on TextVQA at a 20\% retention ratio.
