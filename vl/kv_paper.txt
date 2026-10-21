@@ -1,12 +1,30 @@
-To overcome these limitations, we introduce a learnable strategy for visual token pruning that replaces heuristic scoring rules, aiming at more
-  accurate and robust token importance estimation. Our design is motivated by an empirical observation: attention scores computed in the deep layers
-  of the LLM provide a substantially more reliable signal of visual token importance; however, directly computing these scores requires an additional
-  full prefilling pass, which incurs extra computational and memory costs and undermines the very efficiency that token pruning aims for. To resolve
-  this dilemma, we propose \textbf{DAS} (\textbf{D}eep \textbf{A}ttention \textbf{S}urrogate), a lightweight, plug-and-play framework that predicts
-  deep-layer attention scores to guide visual token pruning. Specifically, we first identify a small subset of visual attention heads whose
-  last-layer attention faithfully localizes query-relevant visual evidence, and use their scores as supervision signals. DAS is then trained to
-  predict these scores directly from the input visual and textual features, enabling query-aware token importance estimation at negligible cost
-  without explicitly computing deep-layer attention. In addition, DAS introduces a boundary-aware distillation loss that concentrates supervision on
-  tokens near the retention threshold, where estimation errors most affect the pruned context. Extensive experiments on XX benchmarks demonstrate
-  that DAS consistently outperforms state-of-the-art pruning methods under identical retention budgets, improving over
-  VisionSelector~\cite{visionselector} by XX\% on ChartQA and XX\% on TextVQA at a 20\% retention ratio.
+\subsection{Multimodal Large Language Models}
+  The remarkable reasoning capabilities of large language models (LLMs)~\cite{gpt4,deepseek} have motivated extending them beyond text-only scenarios
+  to visual understanding, giving rise to multimodal large language models (MLLMs)~\cite{llava1.5,llavanext,qwen3vl}. A typical MLLM consists of
+  three main components: a vision encoder, a multimodal projector, and an LLM. The vision encoder converts an input image into visual features, and
+  the projector maps these features into the LLM's input space. The resulting visual tokens are then fed into the LLM together with textual tokens
+  for multimodal understanding and generation.
+  However, the number of visual tokens grows rapidly with image resolution and video length, and these tokens are often highly redundant. For
+  example, LLaVA-NeXT~\cite{llavanext} adopts the AnyRes technique to support higher-resolution inputs, producing 2,880 visual tokens for a single
+  672 $\times$ 672 image. In the video domain, LongVA~\cite{longva} can process up to 2,000 frames, yielding over 200K visual tokens. Such a large
+  number of visual tokens leads to a substantial KV cache, posing significant challenges to memory consumption and generation efficiency.
+  Consequently, visual token pruning, which aims to enable efficient MLLM inference by removing unimportant visual tokens, has become an active
+  research direction.
+
+  \subsection{Visual Token Pruning}
+  Visual token pruning methods estimate token importance and retain the most relevant visual tokens. The first category, similarity-based methods,
+  removes redundant tokens based on feature similarity. DivPrune~\cite{divprune} greedily selects visual tokens by maximizing the minimum cosine
+  distance between them, favoring a diverse and less redundant subset. DART~\cite{dart} selects a small set of pivot tokens and prunes the rest based
+  on their similarity to the pivots, while HoloV~\cite{holov} adaptively allocates the token budget across image crops according to their
+  information distribution, avoiding over-pruning in information-rich regions. The second category, attention-based methods, instead relies on
+  attention scores. FastV~\cite{fastv} identifies important tokens using attention scores from the early layers of the LLM, while
+  SparseVLM~\cite{sparsevlm} progressively prunes less important tokens across decoder layers. Building on FastV, HAWK~\cite{hawk} assigns different
+  on their similarity to the pivots, while HoloV~\cite{holov} adaptively allocates the token budget across image crops according to their
+  information distribution, avoiding over-pruning in information-rich regions. The second category, attention-based methods, instead relies on
+  attention scores. FastV~\cite{fastv} identifies important tokens using attention scores from the early layers of the LLM, while
+  SparseVLM~\cite{sparsevlm} progressively prunes less important tokens across decoder layers. Building on FastV, HAWK~\cite{hawk} assigns different
+  weights to attention heads when aggregating the scores. The third category combines the above two signals. VisionZip~\cite{visionzip} selects
+  dominant tokens using attention scores within the vision encoder and merges the remaining ones into complementary tokens, while
+  CDPruner~\cite{cdpruner} jointly considers instruction relevance and inter-token redundancy to prune and merge visual tokens. However, these
+  methods all rely on hand-crafted heuristic rules, which limits their robustness across tasks and their performance. In this paper, we address these
+  limitations with a learnable approach.
