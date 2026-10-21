@@ -1,0 +1,10 @@
+Numerous visual token pruning methods reduce computational and memory costs by identifying and removing redundant visual tokens. Existing methods
+can be classified into three categories: similarity-based, attention-based, and attention&similarity-based. Similarity-based methods measure 
+  ▎ similarity among visual tokens to remove redundant ones~\cite{divprune,dart,holov}, while attention-based methods typically use attention scores 
+  ▎ derived from the user instruction to estimate token importance~\cite{fastv,sparsevlm,hawk}. However, similarity-based methods are 
+  ▎ question-agnostic and may overlook image details that only the question makes relevant, whereas attention scores are usually read from the early 
+  ▎ layers of the LLM (e.g., layer 2 in FastV~\cite{fastv}), where attention is dominated by locality and attention-sink 
+  ▎ patterns~\cite{attn_sink,vit_register} rather than by where the answer evidence lies. Although attention&similarity-based methods partially 
+  ▎ alleviate these issues, they rely on heuristic fusion designs and achieve limited performance gains~\cite{visionzip,cdpruner}. This raises a 
+  ▎ question that has not been systematically answered: \emph{is attention an inadequate signal for visual token selection, or has it simply been 
+  ▎ read at the wrong depth?}
