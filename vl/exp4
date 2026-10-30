@@ -1,0 +1,36 @@
+# 实验 4：Qwen3-8B（no thinking）延迟评测 — Full cache vs SnapKV(128 token)
+
+日期：2026-10-30
+模型：Qwen3-8B（/home/admin/Qwen3-8B），bfloat16 + FlashAttention-2，YaRN factor=4.0（128k 窗口）
+模式：no thinking（`enable_thinking=False`）
+上下文：LongBench narrativeqa 文档拼接后按目标长度截断，每长度 1 条样本；question 为固定短指令（总结主要事件）
+方法：
+- **full**：不压缩，KV = 全长
+- **snapkv128**：SnapKV，每层 KV 预算固定 128 token（kvpress `compression_ratio = 1 - 128/L`），prefill 后压缩一次
+测量：greedy，固定 decode 256 tokens（忽略 EOS）；TTFT = prefill（含 SnapKV 打分压缩）+ 首 token；E2E = prefill + 256 token decode；CUDA 计时，1 warmup + 3 次重复取均值（H20-3e 单卡）
+
+## 结果（3 次重复均值）
+
+| 输入长度 | Full TTFT (s) | Full decode (s) | Full E2E (s) | Full ms/tok | SnapKV TTFT (s) | SnapKV decode (s) | SnapKV E2E (s) | SnapKV ms/tok | **E2E 加速比** | decode 加速比 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 8k | 1.25 | 6.57 | 7.82 | 25.7 | 1.28 | 6.50 | 7.77 | 25.4 | 1.01× | 1.01× |
+| 16k | 2.89 | 7.53 | 10.41 | 29.4 | 3.00 | 6.51 | 9.51 | 25.4 | 1.09× | 1.16× |
+| 32k | 7.39 | 9.13 | 16.52 | 35.7 | 7.46 | 6.32 | 13.79 | 24.7 | 1.20× | 1.44× |
+| 64k | 21.55 | 12.85 | 34.39 | 50.2 | 21.66 | 6.76 | 28.42 | 26.4 | 1.21× | 1.90× |
+| **128k** | **71.01** | **21.60** | **92.61** | 84.4 | **71.04** | **6.59** | **77.63** | 25.7 | **1.19×** | **3.28×** |
+
+注：测得实际上下文长度 = 目标长度 + ~280（chat 模板与 question token）。
+
+## 解读
+
+1. **TTFT 完全不受 SnapKV 影响**：各长度两组 TTFT 差异 <1%（128k 都是 71.0s）。SnapKV 的打分压缩开销相对 13 万 token 的 prefill 可以忽略，且 SnapKV 只压 KV 不省 prefill 计算。
+2. **收益全部在 decode，且随长度放大**：decode 加速从 8k 的 1.01× 升到 128k 的 3.28×（84.4 → 25.7 ms/token）。decode 是访存密集型，KV 从 131k 压到 407 后 attention 读取消耗大幅降低；SnapKV 的 decode 曲线几乎平坦（各长度都 ~25-26 ms/tok），验证了"decode 成本由 KV 大小主导"。
+3. **E2E 加速被 prefill 稀释**：短输入时 E2E 加速比接近 1，128k 也只有 1.19×——因为本实验 prefill 远大于 decode（128k 时 prefill 占 E2E 的 77%）。E2E 加速比的天花板 = E2E/(TTFT + decode_snap)；要让 E2E 加速更显著，需要 decode 占比更高的负载（如长生成/thinking）。
+4. **8k 处 SnapKV 反而略慢**：TTFT +0.03s（打分开销），E2E 无收益——KV 本来就小，压缩白付 overhead。8k 以下不建议用 SnapKV。
+
+## 文件
+
+- 汇总：`results_latency/summary.csv`、`results_latency/latency_qwen3_8b_final.csv`（逐次重复）
+- 单长度原始数据：`results_latency/latency_len{8192..131072}[_v2].csv` + 对应 log
+- 脚本：`evaluation/latency_bench.py`（`--length` 单长度、`--decode_tokens`）
+- 注意：venv 内需 `LD_PRELOAD` cuBLAS 12.8（`nvidia/cublas/lib/libcublasLt.so.12`）规避 H20 FPE
