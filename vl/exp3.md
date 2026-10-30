@@ -35,3 +35,7 @@
   - 预测：`eval/outputs/qwen3-8b/aime25__full__merged.jsonl`、`math500__full__shard*of8.jsonl`
   - 评分明细：`eval/eval_res/qwen3-8b/aime25__full.jsonl`、`math500__full_partial.jsonl`
 - 待 RPC 组（P=1024, R=32, c=4）跑完后在本文档追加对比表格。
+
+rpc结果
+<img width="659" height="143" alt="image" src="https://github.com/user-attachments/assets/bec4d498-d7f1-4808-b942-c0a7ad5512a2" />
+
