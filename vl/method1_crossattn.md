@@ -2,9 +2,9 @@
 
 > 配套实验报告: EXPERIMENT_distill_v{1,2,3,4,5,6,7,8}.md / EXPERIMENT_heads_lastlayer.md
 > 代码: harness/train_scorer_v8.py (模块定义 CrossAttnScorer) + harness/eval_local.py (method=distilled)
-> 定稿配置 (v8, 2026-11-05 选定): 1×CrossAttnBlock(dim 768) + 全分布 KL(教师=h24_h2)
-> + 熵匹配辅助 β·(H_s−H_t)², β=0.05。与旧 2-block d512 架构三基座统计打平(EXPERIMENT_distill_v8.md),
-> 取结构更简者定稿。
+> 定稿配置 (2026-11-05 更新): 1×CrossAttnBlock(dim 768) + 全分布 KL(教师=h24_h2)
+> + **ListMLE 排序副损失**(做法C, λ=1.0) —— 熵匹配项由排序项替换(v9, 效果待验)。
+> 架构与旧 2-block d512 三基座统计打平(EXPERIMENT_distill_v8.md), 取结构更简者定稿。
 
 ## 1. 定位
 
@@ -86,11 +86,21 @@ ln_out + scorer  =   198,657
 
 - **教师**：LLM 最后一层（L27）头 {24, 2} 在最后一个 prompt 行对图像 token 的
   注意力分数，原始值平均后归一化：t = (s24+s2)/2, t̂ = t/Σt
-- **损失**：
+- **损失**（两项：KL 主损失 + ListMLE 排序副损失）：
   ```
-  L = KL(t̂ ‖ softmax(logits))  +  β · (H(softmax(logits)) − H(t̂))²
-      前项: 全分布匹配（v1 以来未动）    后项: 熵匹配, β=0.05（v7 甜点区 [0.05,0.2] 取下端）
+  L = KL(t̂ ‖ softmax(logits))  +  λ · L_rank ,   λ=1.0
+
+  L_rank(ListMLE, 做法C):
+    教师分数排序得名次; 只对前 m = ⌊0.2N⌋ 个名次计损失,
+    但分母(竞争池)含全部 N 个 token:
+    L_rank = (1/m) · Σ_{i≤m} [ log Σ_{j≥i} exp(s_(j)) − s_(i) ]
+    含义: 每个入选名次的 token 必须赢过排在它后面的所有人(含集合外 80%)。
+    m 为超参(--listmle_frac, 默认 0.2, 可改 0.1 等)。
   ```
+  分工: KL 管"值"(每个 token 分多少), ListMLE 管"序"(入选者必须压过所有落选者)——
+  下游 top-k 选择的误差全部来自序,而 KL 不直接优化序。
+  (被替换的历史副损失: 熵匹配 β·(H_s−H_t)², β=0.05 —— v7 证明它管"形"(浓度),
+  但"浓度可收, 人选不换", 见 EXPERIMENT_distill_v7.md。)
 - **数据**：chartqa 28,138 + ocr_vqa 80,000 + coco%10 36,410 + textvqa-train 22,492
   （167,040；首轮问题；eval 同款 prompt 与分辨率；答案不进损失）
 - **协议**：骨干全冻结，DDP 7 卡（GPU 0 被外部进程占用，全局 batch 56 = 7×8），
@@ -106,6 +116,8 @@ top-k = max(1, int(N×budget)) → 保留索引送入 LLM generate
 ```
 
 ## 6. 最终成绩（v8 @0.2 全量, vs selector 配对 McNemar）
+
+⚠️ 表中数字为**熵匹配版(v8)**;ListMLE 版(v9, 损失见 §4)尚未跑,成绩待补。
 
 | 条件 | ChartQA | TextVQA |
 |---|---|---|
