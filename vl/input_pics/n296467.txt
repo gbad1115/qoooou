@@ -1,0 +1,7 @@
+轮次 │                                        问题                                         │ 参考答案  │ 模型答案  │
+  ├──────┼─────────────────────────────────────────────────────────────────────────────────────┼───────────┼───────────┤
+  │ 1    │ Which side are the chocolate cookies on?                                            │ right     │ Right     │
+  ├──────┼─────────────────────────────────────────────────────────────────────────────────────┼───────────┼───────────┤
+  │ 2    │ What are the vegetables to the left of the bowl that is to the left of the cookies? │ carrots   │ Carrots   │
+  ├──────┼─────────────────────────────────────────────────────────────────────────────────────┼───────────┼───────────┤
+  │ 3    │ What is sprinkled on the cupcakes that are next to the carrots?                     │ sprinkles │ Sprinkles 
