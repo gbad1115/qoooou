@@ -16,8 +16,9 @@ Data provenance (baked into this bundle, computed once on the GPU box):
                         anchormerge    58 medoid anchor indices + token_weight[576]:
                                        per-token residual softmax weight w (raster
                                        order) used by the heat-map panel
-  textvqa_idx722_*.json  VisionSelector project viz jsons (Qwen2.5-VL, 37x37 grid,
-                                       k=273, scores = student / rank / attention)
+  textvqa_idx722.json    merged VisionSelector viz json (Qwen2.5-VL, 37x37 grid,
+                                       k=273): methods.{ours,fastv,divprune}.selected
+                                       with scores (student / attention / rank)
 """
 from __future__ import annotations
 import os, sys, json
@@ -33,9 +34,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GREEN, RED, GRAY, BLACK = "#1a7f37", "#c62828", "#6b6b6b", "#111111"
 
 # VisionSelector colour ramp: blue (low) -> teal -> green -> gold (high),
-# sampled from the project's own colourbar
-VS_RAMP = [(0.0, 0.267, 0.902), (0.0, 0.463, 0.663), (0.0, 0.659, 0.420),
-           (0.514, 0.741, 0.204), (0.890, 0.729, 0.0)]
+# 66 points sampled from the project's own colourbar (viz/..._selection.png)
+CBAR66 = (
+    (0.000,0.267,0.902), (0.000,0.278,0.890), (0.000,0.290,0.875), (0.000,0.302,0.859), (0.000,0.314,0.843), (0.000,0.329,0.827),
+    (0.000,0.341,0.812), (0.000,0.353,0.796), (0.000,0.365,0.780), (0.000,0.376,0.769), (0.000,0.388,0.753), (0.000,0.400,0.741),
+    (0.000,0.412,0.725), (0.000,0.424,0.710), (0.000,0.439,0.694), (0.000,0.451,0.678), (0.000,0.463,0.663), (0.000,0.475,0.647),
+    (0.000,0.486,0.635), (0.000,0.498,0.620), (0.000,0.510,0.604), (0.000,0.522,0.588), (0.000,0.533,0.573), (0.000,0.549,0.557),
+    (0.000,0.561,0.541), (0.000,0.573,0.525), (0.000,0.584,0.510), (0.000,0.596,0.498), (0.000,0.608,0.482), (0.000,0.620,0.467),
+    (0.000,0.631,0.451), (0.000,0.643,0.435), (0.000,0.659,0.420), (0.027,0.663,0.408), (0.059,0.667,0.396), (0.090,0.675,0.380),
+    (0.114,0.678,0.373), (0.145,0.682,0.357), (0.176,0.686,0.345), (0.208,0.694,0.333), (0.239,0.698,0.318), (0.271,0.702,0.306),
+    (0.302,0.706,0.294), (0.333,0.714,0.278), (0.365,0.718,0.267), (0.388,0.722,0.255), (0.420,0.725,0.243), (0.451,0.729,0.231),
+    (0.482,0.737,0.216), (0.514,0.741,0.204), (0.545,0.745,0.192), (0.576,0.753,0.176), (0.608,0.757,0.165), (0.631,0.761,0.153),
+    (0.663,0.765,0.141), (0.694,0.769,0.129), (0.725,0.776,0.114), (0.757,0.780,0.102), (0.788,0.784,0.090), (0.820,0.792,0.075),
+    (0.851,0.796,0.063), (0.882,0.800,0.051), (0.906,0.804,0.039), (0.937,0.808,0.027), (0.969,0.816,0.012), (0.890,0.729,0.000),
+)
+SQUARE_ALPHA = 0.52     # measured from the project's bare png (white bg .475 / coloured .552)
 
 
 def load_img(name, px=None):
@@ -152,23 +165,30 @@ def mtgqa(outdir):
 
 # ---------------------------------------------------------------- TextVQA track
 def textvqa(method, outdir):
-    d = json.load(open(os.path.join(HERE, f"textvqa_idx722_{method}.json")))
+    # single merged json: shared metadata + per-method selected/scores
+    d = json.load(open(os.path.join(HERE, "textvqa_idx722.json")))
     gh, gw = d["grid"]
     pxs = d["patch_px"]
     rw, rh = d["resized_wh"]
-    sel = np.array(d["selected"], float)
+    m = d["methods"][method]
+    sel = np.array(m["selected"], float)
     idx, scores = sel[:, 0].astype(int), sel[:, 1]
-    img = np.array(Image.open(os.path.join(HERE, "img_textvqa722.jpg")).convert("RGB")
+    # background stays the ORIGINAL image, untouched (matches the project's bare pdf);
+    # only the kept-token squares are blended on top
+    img = np.array(Image.open(os.path.join(HERE, d["image_file"])).convert("RGB")
                    .resize((rw, rh)))
-    faded = np.clip(img * 0.18 + 255.0 * 0.82, 0, 255).astype(np.uint8)
-    cmap = LinearSegmentedColormap.from_list("vs", VS_RAMP)
-    norm = Normalize(vmin=scores.min(), vmax=scores.max())
+    cmap = LinearSegmentedColormap.from_list("vs", CBAR66)
+    # the project colours by RANK over kept tokens (its colourbar label says so);
+    # raw scores are far too skewed for FastV attention and would collapse to blue
+    ranks = np.argsort(np.argsort(scores))
+    tvals = ranks / max(len(scores) - 1, 1)
     fig, ax = plt.subplots(figsize=(rw / 100, rh / 100), dpi=100)
-    ax.imshow(faded)
-    for t, s in zip(idx, scores):
+    ax.imshow(img)
+    for t, tv in zip(idx, tvals):
         r, c = divmod(int(t), gw)
-        ax.add_patch(Rectangle((c * pxs, r * pxs), pxs, pxs, facecolor=cmap(norm(s)),
-                               edgecolor="white", linewidth=0.5, alpha=0.80, zorder=3))
+        ax.add_patch(Rectangle((c * pxs, r * pxs), pxs, pxs, facecolor=cmap(tv),
+                               edgecolor="white", linewidth=0.5, alpha=SQUARE_ALPHA,
+                               zorder=3))
     ax.set_xlim(0, rw); ax.set_ylim(rh, 0); ax.axis("off")
     os.makedirs(outdir, exist_ok=True)
     out = f"{outdir}/vsstyle_{method}_722.png"
