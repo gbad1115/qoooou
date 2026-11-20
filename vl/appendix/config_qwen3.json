@@ -1,0 +1,39 @@
+{
+  "model": "Qwen3-VL-8B",
+  "slug": "qwen3",
+  "n_layers": 36,
+  "panels": {
+    "OCRVQA": {
+      "full_score": 68.33,
+      "selected_layer": 30,
+      "label_side": "left",
+      "full_height_fraction": 0.94
+    },
+    "TextVQA": {
+      "full_score": 85.33,
+      "selected_layer": 21,
+      "label_side": "left",
+      "full_height_fraction": 0.94
+    },
+    "COCO": {
+      "full_score": 65.0,
+      "selected_layer": 18,
+      "label_side": "left",
+      "full_height_fraction": 0.94
+    }
+  },
+  "selected_rule": "argmax",
+  "teacher_layer_0based": 34,
+  "teacher_layer_display": 35,
+  "source": "/ossfs/workspace/visionselector_artifacts/obs_qwen3/OBS_LAYER_TABLE.md",
+  "score_columns": {
+    "OCRVQA": 0,
+    "TextVQA": 2,
+    "COCO": 3
+  },
+  "n_rows_per_dataset": {
+    "ocrvqa": 60,
+    "textvqa": 60,
+    "coco": 60
+  }
+}
