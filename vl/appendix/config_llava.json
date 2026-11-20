@@ -1,0 +1,39 @@
+{
+  "model": "LLaVA-1.5-7B",
+  "slug": "llava",
+  "n_layers": 32,
+  "panels": {
+    "OCRVQA": {
+      "full_score": 46.67,
+      "selected_layer": 27,
+      "label_side": "left",
+      "full_height_fraction": 0.94
+    },
+    "TextVQA": {
+      "full_score": 50.0,
+      "selected_layer": 26,
+      "label_side": "left",
+      "full_height_fraction": 0.94
+    },
+    "COCO": {
+      "full_score": 73.33,
+      "selected_layer": 17,
+      "label_side": "left",
+      "full_height_fraction": 0.94
+    }
+  },
+  "selected_rule": "argmax",
+  "teacher_layer_0based": 26,
+  "teacher_layer_display": 27,
+  "source": "/ossfs/workspace/visionselector_artifacts/obs_llava/OBS_LAYER_TABLE.md",
+  "score_columns": {
+    "OCRVQA": 0,
+    "TextVQA": 2,
+    "COCO": 3
+  },
+  "n_rows_per_dataset": {
+    "ocrvqa": 60,
+    "textvqa": 60,
+    "coco": 60
+  }
+}
