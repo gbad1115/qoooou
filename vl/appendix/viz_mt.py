@@ -17,9 +17,10 @@ Per dialogue writes:
     <dlg>_paper.png/.pdf  4-column figure: photo + Q/ref text | FastV | DivPrune |
                           AnchorMerge heat, with per-turn AM-vs-full answers underneath
     <dlg>_{fastv,divprune,anchormerge}.pdf
-                          12 single-panel figures (viz_bundle panel_*.png style):
-                          photo + star markers, identical star style for all three
-                          methods (AnchorMerge anchors included)
+                          12 single-panel figures, viz_bundle panel_*.png style:
+                          fastv/divprune = photo + stars; anchormerge = residual-weight
+                          heat overlay + stars + colorbar (panel_anchor.png); identical
+                          filled star marker across all three methods
 Provenance: multi/dump_case4mt.py on the GPU box (LLaVA-1.5-7B, vision layer -2 ->
 projector -> AnchorMergeV2 merger from multi/runs/v2f30_1ep/ckpt/best.pt; FastV =
 layer-2 last-prompt-token attention, Q1-guided; DivPrune = greedy max-min cosine
@@ -179,14 +180,29 @@ def paper(c, outdir):
 
 
 def method_pdf(c, m, idx_key, outdir):
-    """Single-panel figure in the viz_bundle/panel_*.png style: photo + star markers,
-    no frame, no title. All three methods (incl. AnchorMerge anchors) use the SAME
-    filled cyan / red-edged star so the panels are directly comparable."""
+    """Single-panel figure in the viz_bundle panel_*.png style, no frame, no title.
+    fastv / divprune: photo + star markers (panel_fastv/divprune.png style).
+    anchormerge: residual-weight heat overlay + stars + colorbar (panel_anchor.png
+    style). All three use the SAME filled cyan / red-edged star marker."""
     dlg = c["dialogue_id"]
-    fig = plt.figure(figsize=(4.2, 4.2))
-    ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
-    ax.imshow(disp_of(dlg))
-    stars(ax, c[idx_key], c["view_px"])
+    px = c["view_px"]
+    disp = disp_of(dlg)
+    if m == "anchormerge":
+        W = np.array(c["token_weight"])
+        fig = plt.figure(figsize=(4.9, 4.2))
+        ax = fig.add_axes([0, 0, 0.855, 1]); ax.axis("off")
+        ax.imshow(heat_overlay(disp, W, px))
+        stars(ax, c[idx_key], px)
+        cax = fig.add_axes([0.885, 0.06, 0.035, 0.88])
+        cb = fig.colorbar(plt.cm.ScalarMappable(cmap="jet",
+                          norm=Normalize(vmin=W.min(), vmax=W.max())), cax=cax)
+        cb.set_label("residual merge weight  w", fontsize=9)
+        cb.ax.tick_params(labelsize=8)
+    else:
+        fig = plt.figure(figsize=(4.2, 4.2))
+        ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
+        ax.imshow(disp)
+        stars(ax, c[idx_key], px)
     out = f"{outdir}/{dlg}_{m}.pdf"
     fig.savefig(out, facecolor="white")
     plt.close(fig)
